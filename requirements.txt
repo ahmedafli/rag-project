@@ -1,0 +1,8 @@
+qdrant-client
+pypdf
+openai
+python-dotenv
+tqdm
+langchain-community
+langchain-text-splitters
+rank-bm25
