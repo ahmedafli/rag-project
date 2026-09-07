@@ -2,6 +2,7 @@ import os
 import glob
 import hashlib
 import uuid
+import pickle
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -83,6 +84,11 @@ def main():
             for c, emb in zip(batch, embeddings)
         ]
         qdrant.upsert(collection_name=config.QDRANT_COLLECTION, points=points)
+
+    # Save a local copy of all chunks for BM25 keyword search
+    with open("bm25_corpus.pkl", "wb") as f:
+        pickle.dump(chunks, f)
+    print(f"Saved BM25 keyword index corpus ({len(chunks)} chunks) to bm25_corpus.pkl")
 
     count = qdrant.count(config.QDRANT_COLLECTION).count
     print(f"Done. {count} chunks stored in Qdrant collection '{config.QDRANT_COLLECTION}'.")
