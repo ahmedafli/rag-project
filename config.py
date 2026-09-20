@@ -12,13 +12,17 @@ EMBEDDING_DIM = 1024
 # --- LLM provider: NVIDIA NIM ---
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-GENERATION_MODEL = "minimaxai/minimax-m3"
+GENERATION_MODEL = "nvidia/nemotron-3-super-120b-a12b"
 MAX_TOKENS = 1024
 
 # --- Vector DB: Qdrant ---
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 QDRANT_COLLECTION = "documents"
+
+JINA_API_KEY = os.getenv("JINA_API_KEY")
+JINA_RERANK_URL = "https://api.jina.ai/v1/rerank"
+RERANK_MODEL = "jina-reranker-v3.5"
 
 # --- Data ---
 DATA_DIR = "data"
