@@ -7,3 +7,5 @@ langchain-community
 langchain-text-splitters
 rank-bm25
 requests
+fastapi
+uvicorn
