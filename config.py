@@ -33,3 +33,9 @@ CHUNK_OVERLAP = 200
 
 # --- Retrieval ---
 TOP_K = 5
+
+
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+JUDGE_MODEL = "qwen/qwen3.8-27b"
