@@ -39,3 +39,13 @@ TOP_K = 5
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 JUDGE_MODEL = "qwen/qwen3.8-27b"
+
+EMBED_BATCH_SIZE = 8
+EMBED_BATCH_DELAY = 15  # seconds to wait between each embedding batch
+
+VISION_MODEL = "meta/llama-3.2-90b-vision-instruct"
+
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+VISION_MODEL = "qwen/qwen3.8-27b:free"

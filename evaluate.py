@@ -36,10 +36,20 @@ def check_keywords(answer: str, expected_keywords: list[str] | None) -> bool | N
     return all(re.sub(r"\s+", "", kw.lower()) in normalized_answer for kw in expected_keywords)
 
 
-def check_refusal(answer: str) -> bool:
-    """Did the model correctly decline, rather than fabricate an answer?"""
-    answer_lower = answer.lower()
-    return any(phrase in answer_lower for phrase in REFUSAL_PHRASES)
+def llm_judge_refusal(groq, question: str, answer: str) -> bool:
+    """Did the model correctly decline to answer, in substance, regardless of exact phrasing?"""
+    judge_prompt = f"""Question: {question}
+Answer given: {answer}
+
+Does the answer correctly decline to answer because the information isn't available, rather than guessing or fabricating a response? Respond with ONLY one word: "YES" or "NO".
+"""
+    response = groq.chat.completions.create(
+        model=config.JUDGE_MODEL,
+        max_tokens=10,
+        messages=[{"role": "user", "content": judge_prompt}],
+    )
+    verdict = (response.choices[0].message.content or "").strip().upper()
+    return verdict.startswith("YES")
 
 
 # ---------- LLM-as-judge checks (understand paraphrasing) ----------
@@ -107,16 +117,27 @@ def main():
         print(f"QUESTION {i}: {question}")
         print("=" * 80)
 
-        candidates = pipeline.hybrid_retrieve(question, fetch_k=10, final_k=10)
-        chunks = rerank(question, candidates, top_n=config.TOP_K)
-
-        prompt = build_prompt(question, chunks)
-        answer = generate_answer(pipeline.nvidia, prompt)
+        try:
+            candidates = pipeline.hybrid_retrieve(question, fetch_k=10, final_k=10)
+            chunks = rerank(question, candidates, top_n=config.TOP_K)
+            prompt = build_prompt(question, chunks)
+            answer = generate_answer(pipeline.nvidia, prompt)
+        except Exception as e:
+            print(f"  FAILED: {e}")
+            results.append({
+                "retrieval_hit": None,
+                "keyword_pass": None,
+                "refusal_correct": None,
+                "faithful": None,
+                "correct": None,
+                "needs": item.get("needs"),
+            })
+            continue
 
         retrieval_hit = check_retrieval_hit(chunks, expected_source)
         keyword_pass = check_keywords(answer, expected_keywords)
         is_refusal_case = expected_source is None
-        refusal_correct = check_refusal(answer) if is_refusal_case else None
+        refusal_correct = llm_judge_refusal(groq, question, answer) if is_refusal_case else None
         faithful = llm_judge_faithfulness(groq, chunks, answer)
         correct = llm_judge_correctness(groq, question, answer, expected_keywords)
 
@@ -134,6 +155,7 @@ def main():
             "refusal_correct": refusal_correct,
             "faithful": faithful,
             "correct": correct,
+            "needs": item.get("needs"),
         })
 
     print("\n" + "=" * 80)
@@ -157,6 +179,14 @@ def main():
     }
     for label, values in metrics.items():
         print(f"{label:<28} {pct(values):>5}  {counts(values)}")
+
+    table_results = [r for r in results if r["needs"] == "table"]
+    if table_results:
+        print("\nTABLE-DEPENDENT QUESTIONS ONLY")
+        for label, key in [("Keyword accuracy (exact)", "keyword_pass"),
+                           ("LLM-judged correctness", "correct")]:
+            vals = [r[key] for r in table_results]
+            print(f"{label:<28} {pct(vals):>5}  {counts(vals)}")
 
 
 if __name__ == "__main__":

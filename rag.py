@@ -6,6 +6,7 @@ import time
 from openai import OpenAI
 from qdrant_client import QdrantClient
 from rank_bm25 import BM25Okapi
+from openai import RateLimitError, APIStatusError
 
 import config
 
@@ -162,14 +163,20 @@ Instructions:
 # LLM Generation
 # ============================================================
 
-def generate_answer(nvidia: OpenAI, prompt: str) -> str:
-
-    response = nvidia.chat.completions.create(
-        model=config.GENERATION_MODEL,
-        max_tokens=config.MAX_TOKENS,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return response.choices[0].message.content
+def generate_answer(nvidia: OpenAI, prompt: str, max_retries: int = 4) -> str:
+    for attempt in range(max_retries):
+        try:
+            response = nvidia.chat.completions.create(
+                model=config.GENERATION_MODEL,
+                max_tokens=config.MAX_TOKENS,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.choices[0].message.content
+        except (RateLimitError, APIStatusError) as e:
+            wait_time = 10 * (attempt + 1)
+            print(f"  Generation error: {e}. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+            time.sleep(wait_time)
+    raise RuntimeError("Exceeded max retries for generation request.")
 
 
 # ============================================================
