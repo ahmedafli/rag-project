@@ -102,6 +102,106 @@ def point_id(source: str, idx, text: str) -> str:
     h = hashlib.md5(f"{source}::{idx}::{text}".encode()).hexdigest()
     return str(uuid.UUID(h))
 
+def ingest_files(file_paths: list[str]) -> dict:
+    """
+    Ingest one or more files, APPENDING to whatever's already in Qdrant and
+    the BM25 corpus, instead of recreating/overwriting them. Used by the
+    upload endpoint -- unlike main(), this never wipes existing data.
+
+    Returns {file_path: chunk_count} for files that succeeded. A file that
+    fails is simply omitted from the result; the caller checks for its
+    presence to know if it succeeded.
+    """
+    deapi = get_deapi_client()
+    qdrant = QdrantClient(url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY)
+
+    # Create the collection only if it doesn't exist yet -- never recreate here
+    existing = [c.name for c in qdrant.get_collections().collections]
+    if config.QDRANT_COLLECTION not in existing:
+        qdrant.create_collection(
+            collection_name=config.QDRANT_COLLECTION,
+            vectors_config=VectorParams(size=config.EMBEDDING_DIM, distance=Distance.COSINE),
+        )
+
+    # Load the existing BM25 corpus, if any, so we can append to it
+    try:
+        with open("bm25_corpus.pkl", "rb") as f:
+            full_corpus = pickle.load(f)
+    except FileNotFoundError:
+        full_corpus = []
+
+    results = {}
+
+    for path in file_paths:
+        source = os.path.basename(path)
+        ext = os.path.splitext(path)[1].lower()
+
+        try:
+            # --- text chunks ---
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=config.CHUNK_SIZE,
+                chunk_overlap=config.CHUNK_OVERLAP,
+            )
+            if ext == ".pdf":
+                loader = PyPDFLoader(path)
+            elif ext in (".txt", ".md"):
+                loader = TextLoader(path, encoding="utf-8")
+            else:
+                raise ValueError(f"Unsupported file type: {ext}")
+
+            raw_chunks = splitter.split_documents(loader.load())
+            file_chunks = []
+            for i, chunk in enumerate(raw_chunks):
+                text = chunk.page_content
+                if is_noise(text) or is_probably_table(text):
+                    continue
+                file_chunks.append({"text": text, "source": source, "chunk_index": i, "type": "text"})
+
+            # --- table chunks (vision transcription), PDFs only ---
+            if ext == ".pdf":
+                tables = extract_all_tables(path)
+                for i, t in enumerate(tables):
+                    file_chunks.append({
+                        "text": t["text"], "source": source, "chunk_index": f"table_{i}",
+                        "type": "table", "page": t["page"],
+                    })
+
+            if not file_chunks:
+                raise ValueError("No extractable content found in file.")
+
+            # --- embed + upload this file's chunks only ---
+            batch_size = config.EMBED_BATCH_SIZE
+            for i in range(0, len(file_chunks), batch_size):
+                batch = file_chunks[i:i + batch_size]
+                texts = [c["text"] for c in batch]
+                embeddings = embed_texts(deapi, texts)
+                points = [
+                    PointStruct(
+                        id=point_id(c["source"], c["chunk_index"], c["text"]),
+                        vector=emb,
+                        payload={
+                            "text": c["text"], "source": c["source"], "chunk_index": c["chunk_index"],
+                            "type": c["type"], "page": c.get("page"),
+                        },
+                    )
+                    for c, emb in zip(batch, embeddings)
+                ]
+                qdrant.upsert(collection_name=config.QDRANT_COLLECTION, points=points)
+                time.sleep(config.EMBED_BATCH_DELAY)
+
+            full_corpus.extend(file_chunks)
+            results[path] = len(file_chunks)
+
+        except Exception as e:
+            print(f"Failed to ingest {source}: {e}")
+            # this file is simply absent from `results` -- caller treats that as failure
+
+    # Re-save the full corpus once, after all files processed
+    with open("bm25_corpus.pkl", "wb") as f:
+        pickle.dump(full_corpus, f)
+
+    return results
+
 
 def main():
     print("Loading + chunking documents...")
