@@ -33,7 +33,7 @@ pipeline = RAGPipeline()
 class QuestionRequest(BaseModel):
     question: str
     k: int = 5
-
+    source_filenames: list[str] = []
 
 class SourceItem(BaseModel):
     n: int
@@ -53,7 +53,11 @@ def health():
 
 @app.post("/ask", response_model=AnswerResponse)
 def ask(request: QuestionRequest):
-    result = pipeline.answer(request.question, k=request.k)
+    result = pipeline.answer(
+        request.question,
+        k=request.k,
+        source_filenames=request.source_filenames
+    )
     return result
 
 @app.post("/upload")

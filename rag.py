@@ -5,7 +5,7 @@ import requests
 import time
 
 from openai import OpenAI
-from qdrant_client import QdrantClient
+from qdrant_client import QdrantClient, models
 from rank_bm25 import BM25Okapi
 from openai import RateLimitError, APIStatusError
 
@@ -226,6 +226,7 @@ class RAGPipeline:
         query: str,
         fetch_k: int = 10,
         final_k: int = config.TOP_K,
+        source_filenames: list[str] | None = None,
     ) -> list[dict]:
 
         has_vector = self.collection_exists()
@@ -237,10 +238,23 @@ class RAGPipeline:
 
         # 2. Vector search (no-op until a collection exists)
         if has_vector:
+            # Build filter if source_filenames specified
+            filter_query = None
+            if source_filenames:
+                filter_query = models.Filter(
+                    should=[
+                        models.FieldCondition(
+                            key="source",
+                            match=models.MatchValue(value=fname),
+                        )
+                        for fname in source_filenames
+                    ]
+                )
             vector_hits = self.qdrant.query_points(
                 collection_name=config.QDRANT_COLLECTION,
                 query=query_vector,
                 limit=fetch_k,
+                query_filter=filter_query,
             ).points
         else:
             vector_hits = []
@@ -254,8 +268,17 @@ class RAGPipeline:
             for r in vector_hits
         ]
 
-        # 3. BM25 search
-        bm25_results = bm25_search(self.bm25, self.corpus, query, k=fetch_k)
+        # 3. BM25 search (restricted to selected sources when provided)
+        if source_filenames:
+            selected_set = set(source_filenames)
+            filtered_corpus = [c for c in self.corpus if c.get("source") in selected_set]
+            if filtered_corpus:
+                filtered_bm25 = BM25Okapi([tokenize(c["text"]) for c in filtered_corpus])
+                bm25_results = bm25_search(filtered_bm25, filtered_corpus, query, k=fetch_k)
+            else:
+                bm25_results = []
+        else:
+            bm25_results = bm25_search(self.bm25, self.corpus, query, k=fetch_k)
 
         # 4. RRF
         fused = reciprocal_rank_fusion(vector_results, bm25_results)
@@ -267,13 +290,13 @@ class RAGPipeline:
     # Full RAG Answer
     # --------------------------------------------------------
 
-    def answer(self, query: str, k: int = config.TOP_K) -> dict:
+    def answer(self, query: str, k: int = config.TOP_K, source_filenames: list[str] | None = None) -> dict:
 
         t0 = time.time()
 
         # Retrieval
         t1 = time.time()
-        candidates = self.hybrid_retrieve(query, fetch_k=10, final_k=10)
+        candidates = self.hybrid_retrieve(query, fetch_k=10, final_k=10, source_filenames=source_filenames)
         print(f"[retrieval] {time.time() - t1:.2f}s")
 
         if not candidates:
