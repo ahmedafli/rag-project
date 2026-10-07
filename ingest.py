@@ -1,6 +1,7 @@
 import os
 import glob
 import hashlib
+import logging
 import uuid
 import pickle
 import re
@@ -8,13 +9,24 @@ import time
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from openai import OpenAI, RateLimitError
+from openai import OpenAI, RateLimitError, APITimeoutError, APIConnectionError, APIStatusError
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from tqdm import tqdm
 
 import config
 from extract_tables import extract_all_tables
+
+
+logger = logging.getLogger("ingest")
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(
+        logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", datefmt="%H:%M:%S")
+    )
+    logger.addHandler(_handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 
 
 def is_noise(text: str) -> bool:
@@ -82,7 +94,24 @@ def load_tables_for_pdfs(data_dir: str) -> list[dict]:
 
 
 def get_deapi_client() -> OpenAI:
-    return OpenAI(base_url=config.DEAPI_BASE_URL, api_key=config.DEAPI_API_KEY)
+    return OpenAI(
+        base_url=config.DEAPI_BASE_URL,
+        api_key=config.DEAPI_API_KEY,
+        timeout=config.EMBED_TIMEOUT,
+    )
+
+
+# Network-ish failures worth retrying: SDK exceptions plus the raw socket/urllib3
+# timeouts that can leak through as plain TimeoutError/OSError.
+TRANSIENT_ERRORS = (
+    RateLimitError,
+    APITimeoutError,
+    APIConnectionError,
+    APIStatusError,
+    TimeoutError,
+    ConnectionError,
+    OSError,
+)
 
 
 def embed_texts(client: OpenAI, texts: list[str], max_retries: int = 5) -> list[list[float]]:
@@ -90,10 +119,12 @@ def embed_texts(client: OpenAI, texts: list[str], max_retries: int = 5) -> list[
         try:
             response = client.embeddings.create(model=config.EMBEDDING_MODEL, input=texts)
             return [item.embedding for item in response.data]
-        except RateLimitError as e:
+        except TRANSIENT_ERRORS as e:
             wait_time = 20 * (attempt + 1)
-            print(f"  Rate limited: {e}")
-            print(f"  Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+            logger.warning(
+                "embed_texts: %s: %s -- retry %d/%d in %ds",
+                type(e).__name__, e, attempt + 1, max_retries, wait_time,
+            )
             time.sleep(wait_time)
     raise RuntimeError("Exceeded max retries for embedding request.")
 
@@ -102,15 +133,15 @@ def point_id(source: str, idx, text: str) -> str:
     h = hashlib.md5(f"{source}::{idx}::{text}".encode()).hexdigest()
     return str(uuid.UUID(h))
 
-def ingest_files(file_paths: list[str]) -> dict:
+def ingest_files(file_paths: list[str]) -> tuple[dict, dict]:
     """
     Ingest one or more files, APPENDING to whatever's already in Qdrant and
     the BM25 corpus, instead of recreating/overwriting them. Used by the
     upload endpoint -- unlike main(), this never wipes existing data.
 
-    Returns {file_path: chunk_count} for files that succeeded. A file that
-    fails is simply omitted from the result; the caller checks for its
-    presence to know if it succeeded.
+    Returns (results, failures):
+      results  = {file_path: chunk_count} for files that succeeded
+      failures = {file_path: "stage: error message"} for files that failed
     """
     deapi = get_deapi_client()
     qdrant = QdrantClient(url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY)
@@ -118,6 +149,7 @@ def ingest_files(file_paths: list[str]) -> dict:
     # Create the collection only if it doesn't exist yet -- never recreate here
     existing = [c.name for c in qdrant.get_collections().collections]
     if config.QDRANT_COLLECTION not in existing:
+        logger.info("Creating Qdrant collection '%s'", config.QDRANT_COLLECTION)
         qdrant.create_collection(
             collection_name=config.QDRANT_COLLECTION,
             vectors_config=VectorParams(size=config.EMBEDDING_DIM, distance=Distance.COSINE),
@@ -131,13 +163,18 @@ def ingest_files(file_paths: list[str]) -> dict:
         full_corpus = []
 
     results = {}
+    failures = {}
 
     for path in file_paths:
         source = os.path.basename(path)
         ext = os.path.splitext(path)[1].lower()
+        t_start = time.time()
+        stage = "start"
 
         try:
             # --- text chunks ---
+            stage = "load + chunk"
+            logger.info("[%s] loading and chunking (%s)...", source, ext or "no ext")
             splitter = RecursiveCharacterTextSplitter(
                 chunk_size=config.CHUNK_SIZE,
                 chunk_overlap=config.CHUNK_OVERLAP,
@@ -156,25 +193,42 @@ def ingest_files(file_paths: list[str]) -> dict:
                 if is_noise(text) or is_probably_table(text):
                     continue
                 file_chunks.append({"text": text, "source": source, "chunk_index": i, "type": "text"})
+            logger.info(
+                "[%s] chunked: %d kept / %d raw text chunks",
+                source, len(file_chunks), len(raw_chunks),
+            )
 
             # --- table chunks (vision transcription), PDFs only ---
             if ext == ".pdf":
+                stage = "table extraction"
+                logger.info("[%s] scanning for tables (vision)...", source)
                 tables = extract_all_tables(path)
                 for i, t in enumerate(tables):
                     file_chunks.append({
                         "text": t["text"], "source": source, "chunk_index": f"table_{i}",
                         "type": "table", "page": t["page"],
                     })
+                logger.info("[%s] table chunks added: %d", source, len(tables))
 
             if not file_chunks:
                 raise ValueError("No extractable content found in file.")
 
             # --- embed + upload this file's chunks only ---
+            stage = "embedding + upload"
             batch_size = config.EMBED_BATCH_SIZE
+            total_batches = (len(file_chunks) + batch_size - 1) // batch_size
+            logger.info(
+                "[%s] embedding %d chunks in %d batch(es) of %d (delay %ss between batches)",
+                source, len(file_chunks), total_batches, batch_size, config.EMBED_BATCH_DELAY,
+            )
             for i in range(0, len(file_chunks), batch_size):
                 batch = file_chunks[i:i + batch_size]
+                batch_no = i // batch_size + 1
                 texts = [c["text"] for c in batch]
+                logger.info("[%s] batch %d/%d: requesting %d embeddings...", source, batch_no, total_batches, len(texts))
+                t_embed = time.time()
                 embeddings = embed_texts(deapi, texts)
+                logger.info("[%s] batch %d/%d: embedded in %.2fs, upserting...", source, batch_no, total_batches, time.time() - t_embed)
                 points = [
                     PointStruct(
                         id=point_id(c["source"], c["chunk_index"], c["text"]),
@@ -187,20 +241,23 @@ def ingest_files(file_paths: list[str]) -> dict:
                     for c, emb in zip(batch, embeddings)
                 ]
                 qdrant.upsert(collection_name=config.QDRANT_COLLECTION, points=points)
-                time.sleep(config.EMBED_BATCH_DELAY)
+                logger.info("[%s] batch %d/%d: upserted (%d/%d chunks done)", source, batch_no, total_batches, min(i + batch_size, len(file_chunks)), len(file_chunks))
+                if i + batch_size < len(file_chunks):
+                    time.sleep(config.EMBED_BATCH_DELAY)
 
             full_corpus.extend(file_chunks)
             results[path] = len(file_chunks)
+            logger.info("[%s] DONE: %d chunks in %.2fs", source, len(file_chunks), time.time() - t_start)
 
         except Exception as e:
-            print(f"Failed to ingest {source}: {e}")
-            # this file is simply absent from `results` -- caller treats that as failure
+            logger.exception("[%s] FAILED during '%s' after %.2fs: %s", source, stage, time.time() - t_start, e)
+            failures[path] = f"{stage}: {type(e).__name__}: {e}"
 
     # Re-save the full corpus once, after all files processed
     with open("bm25_corpus.pkl", "wb") as f:
         pickle.dump(full_corpus, f)
 
-    return results
+    return results, failures
 
 
 def main():

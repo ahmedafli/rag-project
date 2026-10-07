@@ -3,7 +3,7 @@ import shutil
 import uuid
 from fastapi import UploadFile, File, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
-from db import get_db, Document
+from db import get_db, SessionLocal, Document
 from ingest import ingest_files
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -88,3 +88,39 @@ async def upload_documents(
     background_tasks.add_task(process_uploads_sequentially, saved)
 
     return [{"id": doc_id, "status": "processing"} for doc_id, _ in saved]
+
+def process_uploads_sequentially(saved: list[tuple[str, str]]):
+    for doc_id, file_path in saved:
+        db = SessionLocal()
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+        try:
+            results, failures = ingest_files([file_path])
+            if file_path in results:
+                doc.status = "ready"
+                doc.chunk_count = results[file_path]
+                # ingest_files rewrote bm25_corpus.pkl -- refresh the cached index
+                pipeline.reload_bm25()
+            else:
+                doc.status = "failed"
+                doc.error_message = failures.get(file_path, "Ingestion failed -- see server logs.")
+        except Exception as e:
+            doc.status = "failed"
+            doc.error_message = str(e)
+        finally:
+            db.commit()
+            db.close()
+
+
+
+@app.get("/documents/{doc_id}")
+def get_document(doc_id: str, db: Session = Depends(get_db)):
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return doc.to_dict()
+
+
+@app.get("/documents")
+def list_documents(db: Session = Depends(get_db)):
+    docs = db.query(Document).order_by(Document.uploaded_at.desc()).all()
+    return [d.to_dict() for d in docs]

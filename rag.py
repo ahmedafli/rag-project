@@ -1,3 +1,4 @@
+import os
 import pickle
 import re
 import requests
@@ -50,8 +51,15 @@ def tokenize(text: str) -> list[str]:
 
 
 def load_bm25_index():
+    """Return (bm25, corpus), or (None, []) if nothing has been ingested yet."""
+    if not os.path.exists("bm25_corpus.pkl"):
+        return None, []
+
     with open("bm25_corpus.pkl", "rb") as f:
         corpus = pickle.load(f)
+
+    if not corpus:
+        return None, []
 
     tokenized = [tokenize(c["text"]) for c in corpus]
     bm25 = BM25Okapi(tokenized)
@@ -59,6 +67,8 @@ def load_bm25_index():
 
 
 def bm25_search(bm25: BM25Okapi, corpus: list[dict], query: str, k: int) -> list[dict]:
+    if bm25 is None or not corpus:
+        return []
     scores = bm25.get_scores(tokenize(query))
     ranked_idx = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
     return [{**corpus[i], "score": scores[i]} for i in ranked_idx]
@@ -196,8 +206,16 @@ class RAGPipeline:
             api_key=config.QDRANT_API_KEY,
         )
 
-        # Load BM25 corpus/index once
+        # Load BM25 corpus/index once (empty until the first ingest)
         self.bm25, self.corpus = load_bm25_index()
+
+    def reload_bm25(self):
+        """Re-read bm25_corpus.pkl after a new ingest, so uploads become searchable."""
+        self.bm25, self.corpus = load_bm25_index()
+
+    def collection_exists(self) -> bool:
+        names = [c.name for c in self.qdrant.get_collections().collections]
+        return config.QDRANT_COLLECTION in names
 
     # --------------------------------------------------------
     # Hybrid Retrieval
@@ -210,15 +228,22 @@ class RAGPipeline:
         final_k: int = config.TOP_K,
     ) -> list[dict]:
 
+        has_vector = self.collection_exists()
+        if not has_vector and self.bm25 is None:
+            return []
+
         # 1. Embed query
         query_vector = embed_query(self.deapi, query)
 
-        # 2. Vector search
-        vector_hits = self.qdrant.query_points(
-            collection_name=config.QDRANT_COLLECTION,
-            query=query_vector,
-            limit=fetch_k,
-        ).points
+        # 2. Vector search (no-op until a collection exists)
+        if has_vector:
+            vector_hits = self.qdrant.query_points(
+                collection_name=config.QDRANT_COLLECTION,
+                query=query_vector,
+                limit=fetch_k,
+            ).points
+        else:
+            vector_hits = []
 
         vector_results = [
             {
@@ -250,6 +275,9 @@ class RAGPipeline:
         t1 = time.time()
         candidates = self.hybrid_retrieve(query, fetch_k=10, final_k=10)
         print(f"[retrieval] {time.time() - t1:.2f}s")
+
+        if not candidates:
+            return {"answer": "No relevant documents found.", "sources": []}
 
         # Reranking
         t2 = time.time()

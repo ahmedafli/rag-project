@@ -34,6 +34,9 @@ CHUNK_OVERLAP = 200
 # --- Retrieval ---
 TOP_K = 5
 
+# --- Timeouts (seconds) ---
+EMBED_TIMEOUT = 120
+
 
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
