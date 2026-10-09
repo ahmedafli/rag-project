@@ -11,7 +11,7 @@ from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from openai import OpenAI, RateLimitError, APITimeoutError, APIConnectionError, APIStatusError
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import Distance, VectorParams, PointStruct, PayloadSchemaType
 from tqdm import tqdm
 
 import config
@@ -27,6 +27,15 @@ if not logger.handlers:
     logger.addHandler(_handler)
     logger.setLevel(logging.INFO)
     logger.propagate = False
+
+
+def ensure_source_index(qdrant: QdrantClient) -> None:
+    """Create a keyword payload index on 'source' so it can be filtered on."""
+    qdrant.create_payload_index(
+        collection_name=config.QDRANT_COLLECTION,
+        field_name="source",
+        field_schema=PayloadSchemaType.KEYWORD,
+    )
 
 
 def is_noise(text: str) -> bool:
@@ -154,6 +163,7 @@ def ingest_files(file_paths: list[str]) -> tuple[dict, dict]:
             collection_name=config.QDRANT_COLLECTION,
             vectors_config=VectorParams(size=config.EMBEDDING_DIM, distance=Distance.COSINE),
         )
+        ensure_source_index(qdrant)
 
     # Load the existing BM25 corpus, if any, so we can append to it
     try:
@@ -280,6 +290,7 @@ def main():
         collection_name=config.QDRANT_COLLECTION,
         vectors_config=VectorParams(size=config.EMBEDDING_DIM, distance=Distance.COSINE),
     )
+    ensure_source_index(qdrant)
 
     print("Embedding + uploading to Qdrant...")
     batch_size = config.EMBED_BATCH_SIZE

@@ -321,7 +321,7 @@ class RAGPipeline:
         print(f"[TOTAL]     {time.time() - t0:.2f}s")
 
         # Return API-friendly result
-        return {
+        result = {
             "answer": answer_text,
             "sources": [
                 {
@@ -332,6 +332,8 @@ class RAGPipeline:
                 for i, c in enumerate(chunks)
             ],
         }
+        print(f"[response] {result}")
+        return result
 
 
 # ============================================================

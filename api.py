@@ -128,3 +128,23 @@ def get_document(doc_id: str, db: Session = Depends(get_db)):
 def list_documents(db: Session = Depends(get_db)):
     docs = db.query(Document).order_by(Document.uploaded_at.desc()).all()
     return [d.to_dict() for d in docs]
+
+
+@app.delete("/documents/{doc_id}")
+def delete_document(doc_id: str, db: Session = Depends(get_db)):
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    db.delete(doc)
+    db.commit()
+
+    # Remove the stored file (saved as uploads/{doc_id}{ext}) if it exists
+    for entry in os.listdir(UPLOAD_DIR):
+        if entry.startswith(doc_id):
+            try:
+                os.remove(os.path.join(UPLOAD_DIR, entry))
+            except OSError:
+                pass
+
+    return {"id": doc_id, "status": "deleted"}
