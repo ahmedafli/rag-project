@@ -87,17 +87,26 @@ def reciprocal_rank_fusion(
     scores = {}
     chunk_lookup = {}
 
+    def merge(key: str, chunk: dict) -> None:
+        existing = chunk_lookup.get(key, {})
+        # Keep any non-null fields already found; fill gaps from the new chunk
+        merged = {**existing}
+        for field, value in chunk.items():
+            if value is not None or field not in merged:
+                merged[field] = value
+        chunk_lookup[key] = merged
+
     # Add vector search rankings
     for rank, chunk in enumerate(vector_results):
         key = (chunk["source"], chunk["chunk_index"])
         scores[key] = scores.get(key, 0) + 1 / (rank + k)
-        chunk_lookup[key] = chunk
+        merge(key, chunk)
 
     # Add BM25 rankings
     for rank, chunk in enumerate(bm25_results):
         key = (chunk["source"], chunk["chunk_index"])
         scores[key] = scores.get(key, 0) + 1 / (rank + k)
-        chunk_lookup[key] = chunk
+        merge(key, chunk)
 
     # Sort chunks by fused score
     ranked_keys = sorted(scores.keys(), key=lambda key: scores[key], reverse=True)
@@ -263,7 +272,10 @@ class RAGPipeline:
             {
                 "text": r.payload["text"],
                 "source": r.payload["source"],
+                "doc_id": r.payload.get("doc_id"),
                 "chunk_index": r.payload["chunk_index"],
+                "type": r.payload.get("type"),
+                "page": r.payload.get("page"),
             }
             for r in vector_hits
         ]
@@ -327,6 +339,10 @@ class RAGPipeline:
                 {
                     "n": i + 1,
                     "source": c["source"],
+                    "doc_id": c.get("doc_id"),
+                    "page": c.get("page"),
+                    "type": c.get("type"),
+                    "text": c["text"],
                     "rerank_score": round(c["rerank_score"], 4),
                 }
                 for i, c in enumerate(chunks)

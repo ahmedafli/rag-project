@@ -38,6 +38,10 @@ class QuestionRequest(BaseModel):
 class SourceItem(BaseModel):
     n: int
     source: str
+    doc_id: str | None = None
+    page: int | str | None = None
+    type: str | None = None
+    text: str
     rerank_score: float
 
 
@@ -98,7 +102,7 @@ def process_uploads_sequentially(saved: list[tuple[str, str]]):
         db = SessionLocal()
         doc = db.query(Document).filter(Document.id == doc_id).first()
         try:
-            results, failures = ingest_files([file_path])
+            results, failures = ingest_files([file_path], doc_ids={file_path: doc_id})
             if file_path in results:
                 doc.status = "ready"
                 doc.chunk_count = results[file_path]

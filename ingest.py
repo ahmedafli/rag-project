@@ -80,7 +80,10 @@ def load_and_chunk_documents(data_dir: str) -> list[dict]:
             text = chunk.page_content
             if is_noise(text) or is_probably_table(text):
                 continue
-            all_chunks.append({"text": text, "source": source, "chunk_index": i, "type": "text"})
+            all_chunks.append({
+                "text": text, "source": source, "doc_id": os.path.splitext(source)[0],
+                "chunk_index": i, "type": "text",
+            })
     return all_chunks
 
 
@@ -95,6 +98,7 @@ def load_tables_for_pdfs(data_dir: str) -> list[dict]:
             table_chunks.append({
                 "text": t["text"],
                 "source": source,
+                "doc_id": os.path.splitext(source)[0],
                 "chunk_index": f"table_{i}",
                 "type": "table",
                 "page": t["page"],
@@ -142,16 +146,20 @@ def point_id(source: str, idx, text: str) -> str:
     h = hashlib.md5(f"{source}::{idx}::{text}".encode()).hexdigest()
     return str(uuid.UUID(h))
 
-def ingest_files(file_paths: list[str]) -> tuple[dict, dict]:
+def ingest_files(file_paths: list[str], doc_ids: dict[str, str] | None = None) -> tuple[dict, dict]:
     """
     Ingest one or more files, APPENDING to whatever's already in Qdrant and
     the BM25 corpus, instead of recreating/overwriting them. Used by the
     upload endpoint -- unlike main(), this never wipes existing data.
 
+    doc_ids optionally maps a file path to its document id (e.g. the DB row
+    id). When absent, the source filename stem is used.
+
     Returns (results, failures):
       results  = {file_path: chunk_count} for files that succeeded
       failures = {file_path: "stage: error message"} for files that failed
     """
+    doc_ids = doc_ids or {}
     deapi = get_deapi_client()
     qdrant = QdrantClient(url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY)
 
@@ -177,6 +185,7 @@ def ingest_files(file_paths: list[str]) -> tuple[dict, dict]:
 
     for path in file_paths:
         source = os.path.basename(path)
+        doc_id = doc_ids.get(path) or os.path.splitext(source)[0]
         ext = os.path.splitext(path)[1].lower()
         t_start = time.time()
         stage = "start"
@@ -202,7 +211,10 @@ def ingest_files(file_paths: list[str]) -> tuple[dict, dict]:
                 text = chunk.page_content
                 if is_noise(text) or is_probably_table(text):
                     continue
-                file_chunks.append({"text": text, "source": source, "chunk_index": i, "type": "text"})
+                file_chunks.append({
+                    "text": text, "source": source, "doc_id": doc_id,
+                    "chunk_index": i, "type": "text",
+                })
             logger.info(
                 "[%s] chunked: %d kept / %d raw text chunks",
                 source, len(file_chunks), len(raw_chunks),
@@ -215,8 +227,8 @@ def ingest_files(file_paths: list[str]) -> tuple[dict, dict]:
                 tables = extract_all_tables(path)
                 for i, t in enumerate(tables):
                     file_chunks.append({
-                        "text": t["text"], "source": source, "chunk_index": f"table_{i}",
-                        "type": "table", "page": t["page"],
+                        "text": t["text"], "source": source, "doc_id": doc_id,
+                        "chunk_index": f"table_{i}", "type": "table", "page": t["page"],
                     })
                 logger.info("[%s] table chunks added: %d", source, len(tables))
 
@@ -244,7 +256,8 @@ def ingest_files(file_paths: list[str]) -> tuple[dict, dict]:
                         id=point_id(c["source"], c["chunk_index"], c["text"]),
                         vector=emb,
                         payload={
-                            "text": c["text"], "source": c["source"], "chunk_index": c["chunk_index"],
+                            "text": c["text"], "source": c["source"], "doc_id": c["doc_id"],
+                            "chunk_index": c["chunk_index"],
                             "type": c["type"], "page": c.get("page"),
                         },
                     )
@@ -306,6 +319,7 @@ def main():
                 payload={
                     "text": c["text"],
                     "source": c["source"],
+                    "doc_id": c["doc_id"],
                     "chunk_index": c["chunk_index"],
                     "type": c["type"],
                     "page": c.get("page"),
