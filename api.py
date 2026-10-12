@@ -168,3 +168,27 @@ def delete_document(doc_id: str, db: Session = Depends(get_db)):
                 pass
 
     return {"id": doc_id, "status": "deleted"}
+
+@app.get("/conversations")
+def list_conversations(session_id: str, db: Session = Depends(get_db)):
+    rows = (db.query(Conversation).filter_by(session_id=session_id)
+            .order_by(Conversation.created_at.desc()).all())
+    return [{"id": c.id, "title": c.title, "created_at": c.created_at.isoformat()} for c in rows]
+
+
+@app.get("/conversations/{conversation_id}")
+def get_conversation(conversation_id: str, session_id: str, db: Session = Depends(get_db)):
+    convo = db.query(Conversation).filter_by(id=conversation_id, session_id=session_id).first()
+    if not convo:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    msgs = db.query(Message).filter_by(conversation_id=convo.id).order_by(Message.id).all()
+    return {
+        "id": convo.id,
+        "title": convo.title,
+        "messages": [{
+            "role": m.role,
+            "content": m.content,
+            "sources": json.loads(m.sources_json) if m.sources_json else None,
+            "created_at": m.created_at.isoformat(),
+        } for m in msgs],
+    }
