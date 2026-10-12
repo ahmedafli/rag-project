@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from rag import RAGPipeline
 from typing import List
+import json
+from db import Conversation, Message
 
 app = FastAPI(title="RAG Assistant API")
 
@@ -34,6 +36,8 @@ class QuestionRequest(BaseModel):
     question: str
     k: int = 5
     source_filenames: list[str] = []
+    session_id: str
+    conversation_id: str | None = None
 
 class SourceItem(BaseModel):
     n: int
@@ -56,13 +60,25 @@ def health():
 
 
 @app.post("/ask", response_model=AnswerResponse)
-def ask(request: QuestionRequest):
-    result = pipeline.answer(
-        request.question,
-        k=request.k,
-        source_filenames=request.source_filenames
-    )
-    return result
+def ask(request: QuestionRequest, db: Session = Depends(get_db)):
+    convo = None
+    if request.conversation_id:
+        convo = db.query(Conversation).filter_by(
+            id=request.conversation_id, session_id=request.session_id
+        ).first()
+    if not convo:
+        convo = Conversation(session_id=request.session_id, title=request.question[:60])
+        db.add(convo)
+        db.commit()
+
+    result = pipeline.answer(request.question, k=request.k, doc_ids=request.doc_ids)
+
+    db.add(Message(conversation_id=convo.id, role="user", content=request.question,
+                   doc_ids_json=json.dumps(request.doc_ids)))
+    db.add(Message(conversation_id=convo.id, role="assistant", content=result["answer"],
+                   sources_json=json.dumps(result["sources"])))
+    db.commit()
+    return {**result, "conversation_id": convo.id}
 
 @app.post("/upload")
 async def upload_documents(
