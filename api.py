@@ -224,6 +224,18 @@ def list_conversations(session_id: str, db: Session = Depends(get_db)):
     return [{"id": c.id, "title": c.title, "created_at": c.created_at.isoformat()} for c in rows]
 
 
+@app.delete("/conversations/{conversation_id}")
+def delete_conversation(conversation_id: str, session_id: str, db: Session = Depends(get_db)):
+    convo = db.query(Conversation).filter_by(id=conversation_id, session_id=session_id).first()
+    if not convo:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+
+    db.query(Message).filter_by(conversation_id=convo.id).delete()
+    db.delete(convo)
+    db.commit()
+    return {"id": conversation_id, "status": "deleted"}
+
+
 @app.get("/conversations/{conversation_id}")
 def get_conversation(conversation_id: str, session_id: str, db: Session = Depends(get_db)):
     convo = db.query(Conversation).filter_by(id=conversation_id, session_id=session_id).first()
