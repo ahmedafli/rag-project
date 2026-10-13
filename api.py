@@ -1,8 +1,10 @@
 import os
+import pickle
 import shutil
 import uuid
 from fastapi import UploadFile, File, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
+from qdrant_client import models
 from db import get_db, SessionLocal, Document
 from ingest import ingest_files
 from fastapi import FastAPI
@@ -11,6 +13,7 @@ from pydantic import BaseModel
 from rag import RAGPipeline
 from typing import List
 import json
+import config
 from db import Conversation, Message
 
 app = FastAPI(title="RAG Assistant API")
@@ -71,10 +74,10 @@ def ask(request: QuestionRequest, db: Session = Depends(get_db)):
         db.add(convo)
         db.commit()
 
-    result = pipeline.answer(request.question, k=request.k, doc_ids=request.doc_ids)
+    result = pipeline.answer(request.question, k=request.k, source_filenames=request.source_filenames)
 
     db.add(Message(conversation_id=convo.id, role="user", content=request.question,
-                   doc_ids_json=json.dumps(request.doc_ids)))
+                   doc_ids_json=json.dumps(request.source_filenames)))
     db.add(Message(conversation_id=convo.id, role="assistant", content=result["answer"],
                    sources_json=json.dumps(result["sources"])))
     db.commit()
@@ -156,10 +159,55 @@ def delete_document(doc_id: str, db: Session = Depends(get_db)):
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
 
+    # The stored file is uploads/{doc_id}{ext}; its basename is the "source"
+    # value used in both the Qdrant payload and the BM25 corpus.
+    source = os.path.basename(doc.file_path)
+
+    # 1. Remove this document's vectors from Qdrant. Match on doc_id (set by
+    #    uploads) OR source (the UUID filename), so legacy points without a
+    #    doc_id are still purged.
+    try:
+        pipeline.qdrant.delete(
+            collection_name=config.QDRANT_COLLECTION,
+            points_selector=models.FilterSelector(
+                filter=models.Filter(
+                    should=[
+                        models.FieldCondition(
+                            key="doc_id",
+                            match=models.MatchValue(value=doc_id),
+                        ),
+                        models.FieldCondition(
+                            key="source",
+                            match=models.MatchValue(value=source),
+                        ),
+                    ]
+                )
+            ),
+        )
+    except Exception as e:
+        print(f"Failed to delete Qdrant points for {doc_id}: {e}")
+
+    # 2. Drop this document's chunks from the BM25 corpus and refresh the
+    #    in-memory index so keyword search stops returning them too.
+    bm25_path = "bm25_corpus.pkl"
+    if os.path.exists(bm25_path):
+        try:
+            with open(bm25_path, "rb") as f:
+                corpus = pickle.load(f)
+            remaining = [
+                c for c in corpus
+                if c.get("doc_id") != doc_id and c.get("source") != source
+            ]
+            with open(bm25_path, "wb") as f:
+                pickle.dump(remaining, f)
+            pipeline.reload_bm25()
+        except Exception as e:
+            print(f"Failed to update BM25 corpus for {doc_id}: {e}")
+
+    # 3. Delete the DB row and the stored file
     db.delete(doc)
     db.commit()
 
-    # Remove the stored file (saved as uploads/{doc_id}{ext}) if it exists
     for entry in os.listdir(UPLOAD_DIR):
         if entry.startswith(doc_id):
             try:
