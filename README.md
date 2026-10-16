@@ -48,7 +48,15 @@ Evaluation (retrieval hit rate, exact-match,
 LLM-judged correctness & faithfulness, refusal handling)
 
 
-Also wrapped in a FastAPI backend (`api.py`) exposing `POST /ask`.
+Also wrapped in a FastAPI backend (`api.py`) that stores document metadata and
+conversation history in a local SQLite database (`documents.db`), with CORS
+enabled for a future frontend:
+
+- `POST /upload` — upload PDFs/txt/md; ingested in the background, status tracked per document
+- `GET /documents`, `GET /documents/{id}`, `DELETE /documents/{id}` — list/status/delete (delete purges vectors from Qdrant and the BM25 corpus)
+- `POST /ask` — ask a question (takes `session_id` for conversation tracking)
+- `GET /conversations`, `GET /conversations/{id}`, `DELETE /conversations/{id}` — per-session chat history
+- `GET /health`
 
 ## Stack and why
 
@@ -57,9 +65,9 @@ Also wrapped in a FastAPI backend (`api.py`) exposing `POST /ask`.
 | Vector DB | Qdrant Cloud (free tier) | Purpose-built, commonly used at startups; pgvector is the other realistic choice if a team is already Postgres-first |
 | Embeddings | bge-m3 (via deAPI) | Strong multilingual retrieval embedding, hosted so no local compute |
 | Keyword search | BM25 (rank-bm25, local) | Catches exact terms (proper nouns, numbers) that embeddings sometimes under-match |
-| Reranker | Jina cross-encoder | Cross-encoders score (query, chunk) pairs jointly — more precise than embedding similarity, run only on the small hybrid shortlist since it's slower |
+| Reranker | Jina cross-encoder (`jina-reranker-v3.5`) | Cross-encoders score (query, chunk) pairs jointly — more precise than embedding similarity, run only on the small hybrid shortlist since it's slower |
 | Generation LLM | NVIDIA NIM (free tier) | Free, OpenAI-compatible |
-| Judge LLM | Groq (llama-3.1-8b-instant) | Deliberately a *different, faster* model than the generator — judges don't need heavy reasoning, and using the same model to grade itself is a weaker eval design |
+| Judge LLM | Groq (`qwen/qwen3.8-27b`) | Deliberately a *different* model than the generator — using the same model to grade itself is a weaker eval design |
 | Vision (table transcription) | OpenRouter free-tier vision model | Multimodal ingestion for tables/figures, not just extracted text |
 
 ## Setup
@@ -76,6 +84,7 @@ DEAPI_API_KEY=...
 NVIDIA_API_KEY=...
 GROQ_API_KEY=...
 OPENROUTER_API_KEY=...
+JINA_API_KEY=...
 QDRANT_URL=...
 QDRANT_API_KEY=...
 
@@ -92,7 +101,10 @@ python rag.py
 
 # 4. Or run the API
 uvicorn api:app --reload
-# POST http://127.0.0.1:8000/ask  {"question": "..."}
+# POST http://127.0.0.1:8000/upload          (multipart files)
+# POST http://127.0.0.1:8000/ask             {"question": "...", "session_id": "..."}
+# GET  http://127.0.0.1:8000/documents
+# GET  http://127.0.0.1:8000/conversations?session_id=...
 
 # 5. Run the evaluation suite
 python evaluate.py
@@ -183,5 +195,3 @@ and happens to be right.
 
 - Self-consistency checking for table transcription (transcribe twice, flag disagreements)
 - Hybrid weighting tuning (currently equal-weighted RRF between vector and BM25)
-- A frontend (Streamlit/Next.js) instead of CLI + raw API
-- Larger, multi-document corpus to test cross-document retrieval at scale
