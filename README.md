@@ -11,66 +11,7 @@ Test corpus: ["Attention Is All You Need"](https://arxiv.org/abs/1706.03762)
 content types, to stress-test retrieval beyond simple prose.
 
 ## Architecture
-
-1. Document Processing
-
-PDF Documents
-     |
-     +---> Text Extraction + Chunking
-     |     (LangChain splitter, noise-filtered)
-     |
-     +---> Table Detection
-               |
-               v
-         Render Page as Image
-               |
-               v
-         Vision LLM
-               |
-               v
-         Clean Markdown
-               |
-               v
-         Prepared Content
-
-2. Indexing
-
-Prepared Content
-       |
-       +--------------------+
-       |                    |
-       v                    v
-bge-m3 Embeddings      BM25 Keyword Index
-       |
-       v
-Qdrant Vector Database
-
-3. Retrieval and Answer Generation
-
-Vector Search + BM25 Search
-             |
-             v
-     Hybrid Retrieval
-  (Reciprocal Rank Fusion)
-             |
-             v
-    Jina Cross-Encoder
-        Reranker
-             |
-             v
-      Grounded Prompt
- (Context + Citation Instructions)
-             |
-             v
-       LLM Generation
-             |
-             v
-      Answer + Citations
-             |
-             v
-         Evaluation
- (Hit Rate, Exact Match, Correctness,
-  Faithfulness, Refusal Handling)
+<img width="1214" height="1295" alt="Document-to-Answer Architecture Flowchart" src="https://github.com/user-attachments/assets/51cb6849-069a-45f3-bea1-d244d5920a8a" />
 
 
 Also wrapped in a FastAPI backend (`api.py`) that stores document metadata and
