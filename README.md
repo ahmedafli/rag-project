@@ -12,40 +12,65 @@ content types, to stress-test retrieval beyond simple prose.
 
 ## Architecture
 
-Documents (PDF)
-│
-├─→ Text extraction + chunking (LangChain splitter, noise-filtered)
-│
-└─→ Table detection → page rendered as image → vision LLM
-transcribes to clean markdown (see "Multimodal ingestion" below)
-│
-▼
-┌──────────────┴──────────────┐
-▼ ▼
-Embeddings (bge-m3) BM25 keyword index
-│ │
-▼ │
-Qdrant (vector search) │
-│ │
-└──────────────┬──────────────┘
-▼
-Hybrid Retrieval (Reciprocal Rank Fusion)
-│
-▼
-Reranker (Jina cross-encoder)
-│
-▼
-Grounded prompt (context + citation instructions)
-│
-▼
-LLM generation
-│
-▼
-Answer + citations
-│
-▼
-Evaluation (retrieval hit rate, exact-match,
-LLM-judged correctness & faithfulness, refusal handling)
+1. Document Processing
+
+PDF Documents
+     |
+     +---> Text Extraction + Chunking
+     |     (LangChain splitter, noise-filtered)
+     |
+     +---> Table Detection
+               |
+               v
+         Render Page as Image
+               |
+               v
+         Vision LLM
+               |
+               v
+         Clean Markdown
+               |
+               v
+         Prepared Content
+
+2. Indexing
+
+Prepared Content
+       |
+       +--------------------+
+       |                    |
+       v                    v
+bge-m3 Embeddings      BM25 Keyword Index
+       |
+       v
+Qdrant Vector Database
+
+3. Retrieval and Answer Generation
+
+Vector Search + BM25 Search
+             |
+             v
+     Hybrid Retrieval
+  (Reciprocal Rank Fusion)
+             |
+             v
+    Jina Cross-Encoder
+        Reranker
+             |
+             v
+      Grounded Prompt
+ (Context + Citation Instructions)
+             |
+             v
+       LLM Generation
+             |
+             v
+      Answer + Citations
+             |
+             v
+         Evaluation
+ (Hit Rate, Exact Match, Correctness,
+  Faithfulness, Refusal Handling)
 
 
 Also wrapped in a FastAPI backend (`api.py`) that stores document metadata and
